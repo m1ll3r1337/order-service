@@ -11,7 +11,10 @@ import (
 
 	"github.com/rs/zerolog/log"
 	"github.com/urfave/cli/v2"
+	"google.golang.org/grpc"
 
+	ccatalog "github.com/m1ll3r1337/order-service/internal/app/client/catalog"
+	cgrpc "github.com/m1ll3r1337/order-service/internal/app/client/catalog/grpc"
 	"github.com/m1ll3r1337/order-service/internal/app/config"
 	rhandler "github.com/m1ll3r1337/order-service/internal/app/handler/http"
 	rhealth "github.com/m1ll3r1337/order-service/internal/app/handler/http/health"
@@ -42,6 +45,9 @@ type Builder struct {
 
 	healthHandler rhandler.Health
 	orderHandler  rhandler.Order
+
+	catalogV1Client ccatalog.Client
+	catalogGrpcConn *grpc.ClientConn
 
 	processors []processor.Processor
 }
@@ -118,14 +124,34 @@ func (b *Builder) BuildRepoOrder() {
 	}, b.connPostgres)
 }
 
+func (b *Builder) BuildClientGrpcCatalogV1() {
+	b.exec(func(b *Builder) {
+		client, conn, err := cgrpc.NewClient(b.cfg.Client.Catalog.GrpcAddress)
+		if err != nil {
+			b.err = fmt.Errorf("failed to create grpc catalog client: %w", err)
+			return
+		}
+		if err := client.Ping(b.ctx); err != nil {
+			_ = conn.Close()
+			b.err = fmt.Errorf("failed to ping grpc catalog client: %w", err)
+			return
+		}
+
+		b.catalogV1Client = client
+		b.catalogGrpcConn = conn
+
+		processor.WatchForShutdown(b.ctx, &b.wg, b.catalogGrpcConn)
+	})
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 ///// SERVICES /////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////
 
 func (b *Builder) BuildServiceOrder() {
 	b.exec(func(b *Builder) {
-		b.orderService = sorder.NewService(b.orderRepo)
-	}, b.orderRepo)
+		b.orderService = sorder.NewService(b.orderRepo, b.catalogV1Client)
+	}, b.orderRepo, b.catalogV1Client)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
