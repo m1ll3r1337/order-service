@@ -16,6 +16,7 @@ type Config struct {
 	Repository section.Repository `required:"true"`
 	Monitor    section.Monitor    `required:"true"`
 	Processor  section.Processor  `required:"true"`
+	Client     section.Client     `required:"true"`
 }
 
 var Root Config
