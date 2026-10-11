@@ -6,17 +6,20 @@ import (
 
 	"github.com/gofrs/uuid"
 
+	ccatalog "github.com/m1ll3r1337/order-service/internal/app/client/catalog"
 	"github.com/m1ll3r1337/order-service/internal/app/entity"
 	"github.com/m1ll3r1337/order-service/internal/app/repository"
 	"github.com/m1ll3r1337/order-service/internal/app/service"
+	catalogv1 "github.com/m1ll3r1337/order-service/internal/pkg/grpc/gen/catalog/v1"
 )
 
 type srv struct {
-	repoOrder repository.Order
+	repoOrder   repository.Order
+	catalogGrpc ccatalog.Client
 }
 
-func NewService(repoOrder repository.Order) service.Order {
-	return &srv{repoOrder: repoOrder}
+func NewService(repoOrder repository.Order, catalogGrpc ccatalog.Client) service.Order {
+	return &srv{repoOrder: repoOrder, catalogGrpc: catalogGrpc}
 }
 
 func (s *srv) Create(ctx context.Context, req entity.RequestOrderCreate) (entity.Order, error) {
@@ -24,18 +27,42 @@ func (s *srv) Create(ctx context.Context, req entity.RequestOrderCreate) (entity
 
 	orderGUID := uuid.Must(uuid.NewV4())
 
-	var totalPrice int64
-
-	items := make([]entity.OrderItem, 0, len(req.Items))
+	guids := make([]string, 0, len(req.Items))
 	for _, item := range req.Items {
-		totalPrice += int64(item.Quantity) * item.UnitPrice
+		guids = append(guids, item.ProductGUID.String())
+	}
 
+	r, err := s.catalogGrpc.GetProducts(ctx, &catalogv1.GetProductsRequest{
+		Guids: guids,
+	})
+	if err != nil {
+		return entity.Order{}, err
+	}
+
+	prices := make(map[string]int64)
+	for _, p := range r.Products {
+		prices[p.Guid] = p.Price
+	}
+
+	if len(r.MissingGuids) != 0 {
+		return entity.Order{}, entity.ErrIncorrectParameters
+	}
+
+	var totalPrice int64
+	items := make([]entity.OrderItem, 0, len(req.Items))
+	for _, i := range req.Items {
+		price, ok := prices[i.ProductGUID.String()]
+		if !ok {
+			return entity.Order{}, entity.ErrIncorrectParameters
+		}
+
+		totalPrice += price * int64(i.Quantity)
 		items = append(items, entity.OrderItem{
 			GUID:        uuid.Must(uuid.NewV4()),
 			OrderGUID:   orderGUID,
-			ProductGUID: item.ProductGUID,
-			Quantity:    item.Quantity,
-			UnitPrice:   item.UnitPrice,
+			ProductGUID: i.ProductGUID,
+			Quantity:    i.Quantity,
+			UnitPrice:   price,
 			CreatedAt:   now,
 			UpdatedAt:   now,
 		})
@@ -52,7 +79,7 @@ func (s *srv) Create(ctx context.Context, req entity.RequestOrderCreate) (entity
 		Items:      items,
 	}
 
-	err := s.repoOrder.Create(ctx, order)
+	err = s.repoOrder.Create(ctx, order)
 	if err != nil {
 		return entity.Order{}, err
 	}
