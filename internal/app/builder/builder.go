@@ -9,6 +9,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog/log"
 	"github.com/urfave/cli/v2"
 	"google.golang.org/grpc"
@@ -19,6 +20,7 @@ import (
 	rhandler "github.com/m1ll3r1337/order-service/internal/app/handler/http"
 	rhealth "github.com/m1ll3r1337/order-service/internal/app/handler/http/health"
 	horder "github.com/m1ll3r1337/order-service/internal/app/handler/http/order"
+	mmetric "github.com/m1ll3r1337/order-service/internal/app/monitor/metric"
 	"github.com/m1ll3r1337/order-service/internal/app/processor"
 	rprocessor "github.com/m1ll3r1337/order-service/internal/app/processor/http"
 	"github.com/m1ll3r1337/order-service/internal/app/repository"
@@ -150,7 +152,20 @@ func (b *Builder) BuildClientGrpcCatalogV1() {
 
 func (b *Builder) BuildServiceOrder() {
 	b.exec(func(b *Builder) {
-		b.orderService = sorder.NewService(b.orderRepo, b.catalogV1Client)
+		m, err := mmetric.NewPrometheusOrder(prometheus.DefaultRegisterer)
+		if err != nil {
+			b.err = fmt.Errorf("init order metrics: %w", err)
+			return
+		}
+		counts, err := b.orderRepo.CountByStatus(b.ctx)
+		if err != nil {
+			b.err = fmt.Errorf("init order status gauge: %w", err)
+			return
+		}
+		for status, count := range counts {
+			m.Status().Set(status, float64(count))
+		}
+		b.orderService = sorder.NewService(b.orderRepo, b.catalogV1Client, m)
 	}, b.orderRepo, b.catalogV1Client)
 }
 

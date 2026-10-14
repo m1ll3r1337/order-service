@@ -8,6 +8,7 @@ import (
 
 	ccatalog "github.com/m1ll3r1337/order-service/internal/app/client/catalog"
 	"github.com/m1ll3r1337/order-service/internal/app/entity"
+	"github.com/m1ll3r1337/order-service/internal/app/monitor"
 	"github.com/m1ll3r1337/order-service/internal/app/repository"
 	"github.com/m1ll3r1337/order-service/internal/app/service"
 	catalogv1 "github.com/m1ll3r1337/order-service/internal/pkg/grpc/gen/catalog/v1"
@@ -16,13 +17,16 @@ import (
 type srv struct {
 	repoOrder   repository.Order
 	catalogGrpc ccatalog.Client
+	metrics     monitor.OrderMetrics
 }
 
-func NewService(repoOrder repository.Order, catalogGrpc ccatalog.Client) service.Order {
-	return &srv{repoOrder: repoOrder, catalogGrpc: catalogGrpc}
+func NewService(repoOrder repository.Order, catalogGrpc ccatalog.Client, metrics monitor.OrderMetrics) service.Order {
+	return &srv{repoOrder: repoOrder, catalogGrpc: catalogGrpc, metrics: metrics}
 }
 
 func (s *srv) Create(ctx context.Context, req entity.RequestOrderCreate) (entity.Order, error) {
+	createMetric := s.metrics.Create()
+
 	now := time.Now()
 
 	orderGUID := uuid.Must(uuid.NewV4())
@@ -36,6 +40,7 @@ func (s *srv) Create(ctx context.Context, req entity.RequestOrderCreate) (entity
 		Guids: guids,
 	})
 	if err != nil {
+		createMetric.Failed(err)
 		return entity.Order{}, err
 	}
 
@@ -45,6 +50,7 @@ func (s *srv) Create(ctx context.Context, req entity.RequestOrderCreate) (entity
 	}
 
 	if len(r.MissingGuids) != 0 {
+		createMetric.Failed(entity.ErrIncorrectParameters)
 		return entity.Order{}, entity.ErrIncorrectParameters
 	}
 
@@ -53,6 +59,7 @@ func (s *srv) Create(ctx context.Context, req entity.RequestOrderCreate) (entity
 	for _, i := range req.Items {
 		price, ok := prices[i.ProductGUID.String()]
 		if !ok {
+			createMetric.Failed(entity.ErrIncorrectParameters)
 			return entity.Order{}, entity.ErrIncorrectParameters
 		}
 
@@ -81,8 +88,12 @@ func (s *srv) Create(ctx context.Context, req entity.RequestOrderCreate) (entity
 
 	err = s.repoOrder.Create(ctx, order)
 	if err != nil {
+		createMetric.Failed(err)
 		return entity.Order{}, err
 	}
+
+	createMetric.Success(order.TotalPrice)
+	s.metrics.Status().Inc(order.Status)
 	return order, nil
 }
 
@@ -93,6 +104,7 @@ func (s *srv) GetByGUID(ctx context.Context, guid uuid.UUID) (entity.Order, erro
 func (s *srv) Update(ctx context.Context, guid uuid.UUID, req entity.RequestOrderUpdate) (entity.Order, error) {
 	var order entity.Order
 
+	oldStatus := ""
 	err := s.repoOrder.InsideTx(ctx, func(txCtx context.Context) error {
 		var err error
 		order, err = s.repoOrder.GetByGUID(txCtx, guid)
@@ -100,6 +112,7 @@ func (s *srv) Update(ctx context.Context, guid uuid.UUID, req entity.RequestOrde
 			return err
 		}
 
+		oldStatus = order.Status
 		order.Status = req.Status
 		order.UpdatedAt = time.Now()
 
@@ -114,16 +127,19 @@ func (s *srv) Update(ctx context.Context, guid uuid.UUID, req entity.RequestOrde
 		return entity.Order{}, err
 	}
 
+	s.metrics.Status().Transition(oldStatus, order.Status)
 	return order, nil
 }
 
 func (s *srv) Delete(ctx context.Context, guid uuid.UUID) error {
-	return s.repoOrder.InsideTx(ctx, func(txCtx context.Context) error {
+	deletedStatus := ""
+	err := s.repoOrder.InsideTx(ctx, func(txCtx context.Context) error {
 		order, err := s.repoOrder.GetByGUID(txCtx, guid)
 		if err != nil {
 			return err
 		}
 
+		deletedStatus = order.Status
 		err = s.repoOrder.Delete(txCtx, order.GUID)
 		if err != nil {
 			return err
@@ -131,8 +147,47 @@ func (s *srv) Delete(ctx context.Context, guid uuid.UUID) error {
 
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	s.metrics.Status().Dec(deletedStatus)
+	return nil
 }
 
 func (s *srv) List(ctx context.Context, req entity.RequestOrderList) ([]entity.Order, error) {
 	return s.repoOrder.List(ctx, req.Status, req.UserGUID)
 }
+
+//nolint:unused
+type noopOrderMetrics struct{}
+
+//nolint:unused
+type noopOrderCreateMetric struct{}
+
+//nolint:unused
+type noopOrderStatusMetric struct{}
+
+//nolint:unused
+func (noopOrderMetrics) Create() monitor.OrderCreateMetric { return noopOrderCreateMetric{} }
+
+//nolint:unused
+func (noopOrderMetrics) Status() monitor.OrderStatusMetric { return noopOrderStatusMetric{} }
+
+//nolint:unused
+func (noopOrderCreateMetric) Success(int64) {}
+
+//nolint:unused
+func (noopOrderCreateMetric) Failed(error) {}
+
+//nolint:unused
+func (noopOrderStatusMetric) Inc(string) {}
+
+//nolint:unused
+func (noopOrderStatusMetric) Dec(string) {}
+
+//nolint:unused
+func (noopOrderStatusMetric) Transition(string, string) {}
+
+//nolint:unused
+func (noopOrderStatusMetric) Set(string, float64) {}

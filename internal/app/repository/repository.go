@@ -20,4 +20,5 @@ type Order interface {
 	Update(ctx context.Context, order entity.Order) error
 	Delete(ctx context.Context, guid uuid.UUID) error
 	List(ctx context.Context, status *string, userGUID *uuid.UUID) ([]entity.Order, error)
+	CountByStatus(ctx context.Context) (map[string]int64, error)
 }

@@ -99,3 +99,24 @@ func (r *repoPg) List(ctx context.Context, status *string, userGUID *uuid.UUID) 
 
 	return orders, nil
 }
+
+type statusCountRow struct {
+	Status string
+	Count  int64
+}
+
+func (r *repoPg) CountByStatus(ctx context.Context) (map[string]int64, error) {
+	db := r.conn.GetDB(ctx).WithContext(ctx)
+
+	var rows []statusCountRow
+	if err := db.Model(&entity.Order{}).Select("status, COUNT(*) AS count").Group("status").Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	counts := make(map[string]int64, len(rows))
+	for _, row := range rows {
+		counts[row.Status] = row.Count
+	}
+
+	return counts, nil
+}
