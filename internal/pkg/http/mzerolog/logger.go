@@ -55,8 +55,11 @@ func (m *middleware) Callback(c *gin.Context) {
 	ev.Err(err).
 		Ctx(c.Request.Context()).
 		Dur("exec_time", execTime).
-		Str("client_ip", c.ClientIP()).
-		Msg(mb.String())
+		Str("client_ip", c.ClientIP())
+	if status := httph.ErrorGetStatusCode(c.Request); status > 0 {
+		ev.Int("http_status_code", status)
+	}
+	ev.Msg(mb.String())
 }
 
 func NewMiddleware(opts ...Option) gin.HandlerFunc {

@@ -10,6 +10,8 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/m1ll3r1337/order-service/internal/app/config/section"
+	"github.com/m1ll3r1337/order-service/internal/app/constant"
+	msentry "github.com/m1ll3r1337/order-service/internal/app/monitor/sentry"
 )
 
 type Config struct {
@@ -53,7 +55,17 @@ func Load(args LoadArgs) {
 		lvl = zerolog.DebugLevel
 	}
 
-	log.Logger = createLogger(lvl, args.Output)
+	output := args.Output
+	w, ok := msentry.Init(Root.Monitor.Sentry, msentry.Options{
+		ServiceName: constant.AppName,
+		Environment: Root.Monitor.Environment,
+		Release:     constant.Version,
+	})
+	if ok {
+		output = zerolog.MultiLevelWriter(args.Output, w)
+	}
+
+	log.Logger = createLogger(lvl, output)
 	log.Info().Str("log_level", lvl.String()).Msg("Logger re-initialized with config level")
 }
 
