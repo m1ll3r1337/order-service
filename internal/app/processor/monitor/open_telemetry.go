@@ -81,8 +81,10 @@ func NewOpenTelemetryController(
 	cfg.SampleRatio = min(1, max(0, cfg.SampleRatio))
 
 	batchTimeoutOpt := sdktrace.WithBatchTimeout(cfg.SendBatchTimeout)
-	maxQueueSizeOpt := sdktrace.WithMaxQueueSize(int(cfg.MaxQueueSize)) //nolint:gosec // G115
-	spanProc := sdktrace.NewBatchSpanProcessor(exporter, batchTimeoutOpt, maxQueueSizeOpt)
+	maxQueueSizeOpt := sdktrace.WithMaxQueueSize(int(cfg.MaxQueueSize))             //nolint:gosec // G115
+	maxExportBatchSizeOpt := sdktrace.WithMaxExportBatchSize(int(cfg.MaxBatchSize)) //nolint:gosec // G115
+	exportTimeoutOpt := sdktrace.WithExportTimeout(cfg.ExportTimeout)
+	spanProc := sdktrace.NewBatchSpanProcessor(exporter, batchTimeoutOpt, maxQueueSizeOpt, maxExportBatchSizeOpt, exportTimeoutOpt)
 
 	samplerOpt := sdktrace.WithSampler(sdktrace.TraceIDRatioBased(cfg.SampleRatio))
 	spanProcOpt := sdktrace.WithSpanProcessor(spanProc)
