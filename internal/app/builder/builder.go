@@ -17,12 +17,14 @@ import (
 	ccatalog "github.com/m1ll3r1337/order-service/internal/app/client/catalog"
 	cgrpc "github.com/m1ll3r1337/order-service/internal/app/client/catalog/grpc"
 	"github.com/m1ll3r1337/order-service/internal/app/config"
+	"github.com/m1ll3r1337/order-service/internal/app/constant"
 	rhandler "github.com/m1ll3r1337/order-service/internal/app/handler/http"
 	rhealth "github.com/m1ll3r1337/order-service/internal/app/handler/http/health"
 	horder "github.com/m1ll3r1337/order-service/internal/app/handler/http/order"
 	mmetric "github.com/m1ll3r1337/order-service/internal/app/monitor/metric"
 	"github.com/m1ll3r1337/order-service/internal/app/processor"
 	rprocessor "github.com/m1ll3r1337/order-service/internal/app/processor/http"
+	"github.com/m1ll3r1337/order-service/internal/app/processor/monitor"
 	"github.com/m1ll3r1337/order-service/internal/app/repository"
 	rcpostgres "github.com/m1ll3r1337/order-service/internal/app/repository/conn/postgres"
 	porder "github.com/m1ll3r1337/order-service/internal/app/repository/order"
@@ -50,6 +52,8 @@ type Builder struct {
 
 	catalogV1Client ccatalog.Client
 	catalogGrpcConn *grpc.ClientConn
+
+	otelServiceName string
 
 	processors []processor.Processor
 }
@@ -186,12 +190,31 @@ func (b *Builder) BuildHandlerOrder() {
 func (b *Builder) BuildProcHttp() {
 	b.exec(func(b *Builder) {
 		pr := rprocessor.NewHTTP(
+			b.otelServiceName,
 			b.healthHandler,
 			b.orderHandler,
 			b.cfg.Processor.WebServer,
 		)
 		b.processors = append(b.processors, pr)
 	}, b.healthHandler, b.orderHandler)
+}
+
+func (b *Builder) BuildMonitorOpenTelemetry() {
+	cfg := b.cfg.Monitor.OpenTelemetry
+	if !cfg.Enabled {
+		log.Warn().Msg("OpenTelemetry is disabled by config")
+		return
+	}
+
+	b.exec(func(b *Builder) {
+		proc, err := monitor.NewOpenTelemetryController(b.ctx, b.cfg.Monitor.Environment, cfg)
+		if err != nil {
+			b.err = fmt.Errorf("init OpenTelemetry: %w", err)
+			return
+		}
+		b.processors = append(b.processors, proc)
+		b.otelServiceName = constant.AppName
+	})
 }
 
 ////////////////////////////////////////////////////////////////////////////////
