@@ -5,23 +5,36 @@ import (
 	"time"
 
 	"github.com/gofrs/uuid"
+	"github.com/rs/zerolog/log"
 
 	ccatalog "github.com/m1ll3r1337/order-service/internal/app/client/catalog"
 	"github.com/m1ll3r1337/order-service/internal/app/entity"
 	"github.com/m1ll3r1337/order-service/internal/app/monitor"
 	"github.com/m1ll3r1337/order-service/internal/app/repository"
 	"github.com/m1ll3r1337/order-service/internal/app/service"
+	"github.com/m1ll3r1337/order-service/internal/pkg/broker"
 	catalogv1 "github.com/m1ll3r1337/order-service/internal/pkg/grpc/gen/catalog/v1"
 )
 
 type srv struct {
-	repoOrder   repository.Order
-	catalogGrpc ccatalog.Client
-	metrics     monitor.OrderMetrics
+	repoOrder       repository.Order
+	catalogGrpc     ccatalog.Client
+	metrics         monitor.OrderMetrics
+	busOrderCreated broker.Bus[entity.EventOrderCreated]
 }
 
-func NewService(repoOrder repository.Order, catalogGrpc ccatalog.Client, metrics monitor.OrderMetrics) service.Order {
-	return &srv{repoOrder: repoOrder, catalogGrpc: catalogGrpc, metrics: metrics}
+func NewService(
+	repoOrder repository.Order,
+	catalogGrpc ccatalog.Client,
+	metrics monitor.OrderMetrics,
+	busOrderCreated broker.Bus[entity.EventOrderCreated],
+) service.Order {
+	return &srv{
+		repoOrder:       repoOrder,
+		catalogGrpc:     catalogGrpc,
+		metrics:         metrics,
+		busOrderCreated: busOrderCreated,
+	}
 }
 
 func (s *srv) Create(ctx context.Context, req entity.RequestOrderCreate) (entity.Order, error) {
@@ -90,6 +103,36 @@ func (s *srv) Create(ctx context.Context, req entity.RequestOrderCreate) (entity
 	if err != nil {
 		createMetric.Failed(err)
 		return entity.Order{}, err
+	}
+
+	var userGUID *string
+	if order.UserGUID != nil {
+		guid := order.UserGUID.String()
+		userGUID = &guid
+	}
+
+	eventOrderCreatedItems := make([]entity.EventOrderCreatedItem, len(order.Items))
+	for i, item := range order.Items {
+		eventOrderCreatedItems[i] = entity.EventOrderCreatedItem{
+			ProductGUID: item.ProductGUID.String(),
+			Quantity:    item.Quantity,
+			UnitPrice:   item.UnitPrice,
+		}
+	}
+
+	ev := entity.EventOrderCreated{
+		OrderGUID:  order.GUID.String(),
+		UserGUID:   userGUID,
+		Currency:   order.Currency,
+		TotalPrice: order.TotalPrice,
+		Items:      eventOrderCreatedItems,
+		CreatedAt:  order.CreatedAt.UTC().Format(time.RFC3339),
+	}
+
+	err = s.busOrderCreated.Send(ctx, &ev, entity.BrokerHeaderOrderCreatedType(), entity.BrokerHeaderOrderCreatedEventID())
+	if err != nil {
+		log.Error().EmbedObject(ev).Err(err).Msg("failed to publish order.created")
+		createMetric.PublishFailed()
 	}
 
 	createMetric.Success(order.TotalPrice)
@@ -179,6 +222,9 @@ func (noopOrderCreateMetric) Success(int64) {}
 
 //nolint:unused
 func (noopOrderCreateMetric) Failed(error) {}
+
+//nolint:unused
+func (noopOrderCreateMetric) PublishFailed() {}
 
 //nolint:unused
 func (noopOrderStatusMetric) Inc(string) {}

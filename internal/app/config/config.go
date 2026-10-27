@@ -20,6 +20,7 @@ type Config struct {
 	Monitor    section.Monitor    `required:"true"`
 	Processor  section.Processor  `required:"true"`
 	Client     section.Client     `required:"true"`
+	Broker     section.Broker     `required:"true"`
 }
 
 var Root Config

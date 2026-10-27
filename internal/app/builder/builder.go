@@ -18,6 +18,7 @@ import (
 	cgrpc "github.com/m1ll3r1337/order-service/internal/app/client/catalog/grpc"
 	"github.com/m1ll3r1337/order-service/internal/app/config"
 	"github.com/m1ll3r1337/order-service/internal/app/constant"
+	"github.com/m1ll3r1337/order-service/internal/app/entity"
 	rhandler "github.com/m1ll3r1337/order-service/internal/app/handler/http"
 	rhealth "github.com/m1ll3r1337/order-service/internal/app/handler/http/health"
 	horder "github.com/m1ll3r1337/order-service/internal/app/handler/http/order"
@@ -30,6 +31,8 @@ import (
 	porder "github.com/m1ll3r1337/order-service/internal/app/repository/order"
 	"github.com/m1ll3r1337/order-service/internal/app/service"
 	sorder "github.com/m1ll3r1337/order-service/internal/app/service/order"
+	"github.com/m1ll3r1337/order-service/internal/pkg/broker"
+	"github.com/m1ll3r1337/order-service/internal/pkg/broker/codec"
 )
 
 type Builder struct {
@@ -52,6 +55,9 @@ type Builder struct {
 
 	catalogV1Client ccatalog.Client
 	catalogGrpcConn *grpc.ClientConn
+
+	kafkaClient     *broker.KafkaClient
+	busOrderCreated broker.Bus[entity.EventOrderCreated]
 
 	otelServiceName string
 
@@ -151,12 +157,47 @@ func (b *Builder) BuildClientGrpcCatalogV1() {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+///// BROKER ///////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+
+func (b *Builder) BuildBrokerKafka() {
+	b.exec(func(b *Builder) {
+		cfg := b.cfg.Broker.Kafka
+
+		kafka, err := broker.NewKafkaClient(broker.KafkaConfig{
+			Addresses:     b.cfg.Broker.Kafka.Addresses,
+			ConsumerGroup: b.cfg.Broker.Kafka.ConsumerGroup,
+			ClientID:      b.cfg.Broker.Kafka.ClientID,
+		})
+		if err != nil {
+			b.err = fmt.Errorf("failed to create kafka client: %w", err)
+			return
+		}
+
+		b.kafkaClient = kafka
+
+		topic := cfg.ModelOrder.Created.Topic
+		group := broker.Coalesce(cfg.ModelOrder.Created.ConsumerGroup, cfg.ConsumerGroup)
+
+		bus, err := broker.NewBus[entity.EventOrderCreated](kafka, codec.NewCodecJson[entity.EventOrderCreated](), topic, group)
+		if err != nil {
+			b.err = fmt.Errorf("failed to create event.order.created bus: %w", err)
+			return
+		}
+
+		b.busOrderCreated = bus
+
+		processor.WatchForShutdown(b.ctx, &b.wg, processor.CloserFunc(kafka.Close))
+	})
+}
+
+////////////////////////////////////////////////////////////////////////////////
 ///// SERVICES /////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////
 
 func (b *Builder) BuildServiceOrder() {
 	b.exec(func(b *Builder) {
-		m, err := mmetric.NewPrometheusOrder(prometheus.DefaultRegisterer)
+		orderMetrics, err := mmetric.NewPrometheusOrder(prometheus.DefaultRegisterer)
 		if err != nil {
 			b.err = fmt.Errorf("init order metrics: %w", err)
 			return
@@ -167,10 +208,10 @@ func (b *Builder) BuildServiceOrder() {
 			return
 		}
 		for status, count := range counts {
-			m.Status().Set(status, float64(count))
+			orderMetrics.Status().Set(status, float64(count))
 		}
-		b.orderService = sorder.NewService(b.orderRepo, b.catalogV1Client, m)
-	}, b.orderRepo, b.catalogV1Client)
+		b.orderService = sorder.NewService(b.orderRepo, b.catalogV1Client, orderMetrics, b.busOrderCreated)
+	}, b.orderRepo, b.catalogV1Client, b.busOrderCreated)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
