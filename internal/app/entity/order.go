@@ -73,6 +73,21 @@ func (e EventOrderCreated) MarshalZerologObject(ev *zerolog.Event) {
 	ev.Int("items_count", len(e.Items))
 }
 
+// EventOrderDeliveryCalculated — результат расчёта доставки. Деньги в копейках
+// (int64), как TotalPrice; currency — код валюты заказа.
+type EventOrderDeliveryCalculated struct {
+	OrderGUID     string `json:"order_guid"`
+	DeliveryPrice int64  `json:"delivery_price"`
+	Currency      string `json:"currency"`
+	CalculatedAt  string `json:"calculated_at"`
+}
+
+func (e EventOrderDeliveryCalculated) MarshalZerologObject(ev *zerolog.Event) {
+	ev.Str("order_guid", e.OrderGUID).
+		Int64("delivery_price", e.DeliveryPrice).
+		Str("currency", e.Currency)
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 ///// EVENT AUXILIARIES ////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////

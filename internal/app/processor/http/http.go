@@ -49,8 +49,10 @@ func NewHTTP(otelServiceName string, hHealth rhandler.Health, hOrder rhandler.Or
 	vGenericRegHealthCheck(router, hHealth)
 	vGenericRegPprof(router)
 
-	v1 := router.Group("/v1")
-	v1RegOrderHandler(v1, hOrder)
+	if hOrder != nil {
+		v1 := router.Group("/v1")
+		v1RegOrderHandler(v1, hOrder)
+	}
 
 	routes := router.Routes()
 	for _, route := range routes {

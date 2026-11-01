@@ -19,17 +19,20 @@ import (
 	"github.com/m1ll3r1337/order-service/internal/app/config"
 	"github.com/m1ll3r1337/order-service/internal/app/constant"
 	"github.com/m1ll3r1337/order-service/internal/app/entity"
+	edelivery "github.com/m1ll3r1337/order-service/internal/app/handler/event/delivery"
 	rhandler "github.com/m1ll3r1337/order-service/internal/app/handler/http"
 	rhealth "github.com/m1ll3r1337/order-service/internal/app/handler/http/health"
 	horder "github.com/m1ll3r1337/order-service/internal/app/handler/http/order"
 	mmetric "github.com/m1ll3r1337/order-service/internal/app/monitor/metric"
 	"github.com/m1ll3r1337/order-service/internal/app/processor"
+	eprocessor "github.com/m1ll3r1337/order-service/internal/app/processor/event"
 	rprocessor "github.com/m1ll3r1337/order-service/internal/app/processor/http"
 	"github.com/m1ll3r1337/order-service/internal/app/processor/monitor"
 	"github.com/m1ll3r1337/order-service/internal/app/repository"
 	rcpostgres "github.com/m1ll3r1337/order-service/internal/app/repository/conn/postgres"
 	porder "github.com/m1ll3r1337/order-service/internal/app/repository/order"
 	"github.com/m1ll3r1337/order-service/internal/app/service"
+	sdelivery "github.com/m1ll3r1337/order-service/internal/app/service/delivery"
 	sorder "github.com/m1ll3r1337/order-service/internal/app/service/order"
 	"github.com/m1ll3r1337/order-service/internal/pkg/broker"
 	"github.com/m1ll3r1337/order-service/internal/pkg/broker/codec"
@@ -48,7 +51,8 @@ type Builder struct {
 
 	orderRepo repository.Order
 
-	orderService service.Order
+	orderService    service.Order
+	deliveryService service.Delivery
 
 	healthHandler rhandler.Health
 	orderHandler  rhandler.Order
@@ -56,8 +60,9 @@ type Builder struct {
 	catalogV1Client ccatalog.Client
 	catalogGrpcConn *grpc.ClientConn
 
-	kafkaClient     *broker.KafkaClient
-	busOrderCreated broker.Bus[entity.EventOrderCreated]
+	kafkaClient           *broker.KafkaClient
+	busOrderCreated       broker.Bus[entity.EventOrderCreated]
+	busDeliveryCalculated broker.Bus[entity.EventOrderDeliveryCalculated]
 
 	otelServiceName string
 
@@ -162,8 +167,6 @@ func (b *Builder) BuildClientGrpcCatalogV1() {
 
 func (b *Builder) BuildBrokerKafka() {
 	b.exec(func(b *Builder) {
-		cfg := b.cfg.Broker.Kafka
-
 		kafka, err := broker.NewKafkaClient(broker.KafkaConfig{
 			Addresses:     b.cfg.Broker.Kafka.Addresses,
 			ConsumerGroup: b.cfg.Broker.Kafka.ConsumerGroup,
@@ -176,24 +179,58 @@ func (b *Builder) BuildBrokerKafka() {
 
 		b.kafkaClient = kafka
 
+		processor.WatchForShutdown(b.ctx, &b.wg, processor.CloserFunc(b.kafkaClient.Close))
+	})
+}
+
+func (b *Builder) BuildProducerOrderCreated() {
+	b.exec(func(b *Builder) {
+		cfg := b.cfg.Broker.Kafka
+
 		topic := cfg.ModelOrder.Created.Topic
 		group := broker.Coalesce(cfg.ModelOrder.Created.ConsumerGroup, cfg.ConsumerGroup)
 
-		bus, err := broker.NewBus[entity.EventOrderCreated](kafka, codec.NewCodecJson[entity.EventOrderCreated](), topic, group)
+		bus, err := broker.NewBus[entity.EventOrderCreated](b.kafkaClient, codec.NewCodecJson[entity.EventOrderCreated](), topic, group)
 		if err != nil {
 			b.err = fmt.Errorf("failed to create event.order.created bus: %w", err)
 			return
 		}
 
 		b.busOrderCreated = bus
+	}, b.kafkaClient)
+}
 
-		processor.WatchForShutdown(b.ctx, &b.wg, processor.CloserFunc(kafka.Close))
-	})
+func (b *Builder) BuildConsumerDeliveryCalculated() {
+	b.exec(func(b *Builder) {
+		cfg := b.cfg.Broker.Kafka
+
+		topic := cfg.ModelOrder.DeliveryCalculated.Topic
+		group := broker.Coalesce(cfg.ModelOrder.DeliveryCalculated.ConsumerGroup, cfg.ConsumerGroup)
+
+		bus, err := broker.NewBus[entity.EventOrderDeliveryCalculated](b.kafkaClient,
+			codec.NewCodecJson[entity.EventOrderDeliveryCalculated](), topic, group)
+		if err != nil {
+			b.err = fmt.Errorf("failed to create event.delivery.calculated bus: %w", err)
+			return
+		}
+
+		b.busDeliveryCalculated = bus
+
+		handler := edelivery.NewHandler(b.deliveryService)
+		p := eprocessor.NewDeliveryCalculatedEventCatcher(handler, b.busDeliveryCalculated)
+		b.processors = append(b.processors, p)
+	}, b.kafkaClient, b.deliveryService)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 ///// SERVICES /////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////
+
+func (b *Builder) BuildServiceDelivery() {
+	b.exec(func(b *Builder) {
+		b.deliveryService = sdelivery.NewService(b.orderRepo)
+	}, b.orderRepo)
+}
 
 func (b *Builder) BuildServiceOrder() {
 	b.exec(func(b *Builder) {
@@ -238,6 +275,20 @@ func (b *Builder) BuildProcHttp() {
 		)
 		b.processors = append(b.processors, pr)
 	}, b.healthHandler, b.orderHandler)
+}
+
+// BuildProcHttpService поднимает только служебные маршруты (health/metrics/pprof)
+// без бизнес-маршрутов /v1.
+func (b *Builder) BuildProcHttpService() {
+	b.exec(func(b *Builder) {
+		pr := rprocessor.NewHTTP(
+			b.otelServiceName,
+			b.healthHandler,
+			nil,
+			b.cfg.Processor.WebServer,
+		)
+		b.processors = append(b.processors, pr)
+	}, b.healthHandler)
 }
 
 func (b *Builder) BuildMonitorOpenTelemetry() {
