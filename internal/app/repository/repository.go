@@ -21,4 +21,5 @@ type Order interface {
 	Delete(ctx context.Context, guid uuid.UUID) error
 	List(ctx context.Context, status *string, userGUID *uuid.UUID) ([]entity.Order, error)
 	CountByStatus(ctx context.Context) (map[string]int64, error)
+	ApplyDeliveryCalculated(ctx context.Context, guid uuid.UUID, deliveryPrice int64) (bool, error)
 }

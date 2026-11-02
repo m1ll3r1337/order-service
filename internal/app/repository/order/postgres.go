@@ -3,6 +3,7 @@ package porder
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/gofrs/uuid"
 	"gorm.io/gorm"
@@ -119,4 +120,21 @@ func (r *repoPg) CountByStatus(ctx context.Context) (map[string]int64, error) {
 	}
 
 	return counts, nil
+}
+
+func (r *repoPg) ApplyDeliveryCalculated(ctx context.Context, guid uuid.UUID, deliveryPrice int64) (bool, error) {
+	db := r.conn.GetDB(ctx).WithContext(ctx)
+
+	res := db.Model(&entity.Order{}).
+		Where("guid = ? AND status = ?", guid, "pending").
+		Updates(map[string]any{
+			"delivery_price": deliveryPrice,
+			"status":         "delivery_calculated",
+			"updated_at":     time.Now(),
+		})
+	if res.Error != nil {
+		return false, res.Error
+	}
+
+	return res.RowsAffected > 0, nil
 }
